@@ -1,0 +1,58 @@
+name: 更新软件清单
+
+# bucket/voicefox.json 里的 version / url / hash 必须三者同时正确，刷新逻辑
+# 放在 scripts/update-manifest.sh 里（本地和 CI 跑同一份）：从上游 Releases API
+# 取最新 Windows 包、下载、算 hash、按需重写清单。
+# 这里不引入第三方 action —— 一次脚本 + 一次 git commit 就够，免得把
+# contents: write 交给 @main 这类浮动版本。
+
+on:
+  # 主触发：轮询上游 release。清单里 checkver/autoupdate 只在有人手动跑
+  # scoop 工具时才生效，定时轮询才是「无人值守也会更新」的那一环。
+  # GitHub 的定时任务是排队执行，不保证准点，每 6 小时一次足够。
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+  # 可选快车道：上游发布后想在几分钟内同步（而不是等下一次轮询），
+  # 由上游仓库用 repository_dispatch 触发即可，无需改动本文件。
+  # 在那之前这个触发保持静默，注意 dispatch 需要带 repo 权限的 token。
+  repository_dispatch:
+    types: [voicefox-release]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-manifest
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: 刷新 bucket/voicefox.json
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # 定时 / dispatch 触发的默认 checkout 未必停在 main 上，
+          # 显式钉住才能让后面的 git push 有分支可推。
+          ref: main
+
+      - name: 按最新 release 刷新清单
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/update-manifest.sh
+
+      - name: 提交改动
+        run: |
+          if [ -z "$(git status --porcelain bucket/voicefox.json)" ]; then
+            echo "清单已是最新，无需提交"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/voicefox.json
+          git commit -m "♻️ 自动更新软件清单"
+          git push origin main
